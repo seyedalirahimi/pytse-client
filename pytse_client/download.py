@@ -12,7 +12,7 @@ from pytse_client.utils import requests_retry_session
 from pytse_client.tse_settings import TSE_CLIENT_TYPE_DATA_URL
 
 
-def download(
+def download_history_price(
         symbols: Union[List, str],
         write_to_csv: bool = False,
         include_jdate: bool = False,
@@ -53,10 +53,10 @@ def download(
 def _adjust_data_frame(df, include_jdate):
     df.date = pd.to_datetime(df.date, format="%Y%m%d")
     if include_jdate:
-        df['jdate'] = ""
-        df.jdate = df.date.apply(
+        jdate = df.date.apply(
             lambda gregorian:
             jdatetime.date.fromgregorian(date=gregorian))
+    df.date = jdate
     df.set_index("date", inplace=True)
 
 
@@ -162,6 +162,55 @@ def get_symbol_id(symbol_name: str):
         return symbol_full_info[2]  # symbol id
     return None
 
+
+
+def download(
+        symbols: Union[List, str],
+        write_to_csv: bool = False,
+        include_jdate: bool = True,
+        base_path: str = config.DATA_BASE_PATH):
+    if symbols == "all":
+        symbols = symbols_data.all_symbols()
+    elif isinstance(symbols, str):
+        symbols = [symbols]
+
+    df_list = {}
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        for symbol in symbols:
+            ticker_index = symbols_data.get_ticker_index(symbol)
+            _handle_ticker_index(symbol, ticker_index)
+            future = executor.submit(
+                download_ticker_daily_record,
+                ticker_index
+            )
+            df1: pd.DataFrame = future.result()
+            df1 = df1.iloc[::-1]
+            df1 = df1.rename(
+                columns=FIELD_MAPPINGS
+            )
+            df1 = df1.drop(columns=["<PER>", "<OPEN>", "<TICKER>"])
+            _adjust_data_frame(df1, include_jdate)
+
+            future = executor.submit(
+                download_ticker_client_types_record,
+                ticker_index
+            )
+            df2: pd.DataFrame = future.result()
+            _adjust_data_frame(df2, include_jdate)
+
+
+
+            df = df1.join(df2)
+            df_list[symbol] = df
+            if write_to_csv:
+                Path(base_path).mkdir(parents=True, exist_ok=True)
+                df.to_csv(
+                    f'{base_path}/{symbol}.csv')
+
+    if len(df_list) != len(symbols):
+        print("Warning, download did not complete, re-run the code")
+    return df_list
 
 FIELD_MAPPINGS = {
     "<DTYYYYMMDD>": "date",
